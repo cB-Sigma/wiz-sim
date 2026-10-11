@@ -1,0 +1,41 @@
+wiz-sim (simulated WiZ lights and plugs, in Go)
+Copyright 2026 Abhinav Gautam
+
+This module is licensed under the Apache License, Version 2.0 (LICENSE).
+
+The code was written for SigmaM2M, a oneM2M platform, from public
+descriptions of the WiZ local API (PROVENANCE.md). It contains no code
+from other projects. sim/sim.go comes from SigmaM2M and carries no
+per-file copyright header, the convention of the code it comes from; the
+copyright line above covers it. Files added for this module carry
+"Copyright 2026 Abhinav Gautam" and "SPDX-License-Identifier: Apache-2.0".
+
+WiZ is a trademark of its owner. This module is not made, endorsed or
+supported by the owner of the WiZ products; the name is used only to say
+which devices it simulates.
+
+Facts from other projects
+-------------------------
+
+The vendor does not publish the local API. The method names, parameter
+names, ports, module names and scene numbers the simulator uses are
+facts read from public descriptions, chiefly pywizlight
+(github.com/sbidy/pywizlight; MIT, Copyright (c) 2020 Stephan Traub).
+No code was taken; see PROVENANCE.md.
+
+Dependencies
+------------
+
+- The Go standard library (BSD-3-Clause, Copyright The Go Authors).
+- github.com/cB-Sigma/wiz (the WiZ local API client; Copyright 2026
+  Abhinav Gautam, Apache-2.0). Used by the tests and the command.
+- github.com/cB-Sigma/lanbcast (indirect, through wiz; LAN broadcast
+  helper; Copyright 2026 Abhinav Gautam, Apache-2.0, standard library
+  only).
+
+Test data
+---------
+
+Every MAC address, module name, firmware version, power reading and
+address in the simulator, the tests and cmd/wizsim is a made-up demo
+value.
