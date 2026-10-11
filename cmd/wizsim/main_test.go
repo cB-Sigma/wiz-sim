@@ -61,7 +61,7 @@ func TestRunner(t *testing.T) {
 }
 
 func TestRunnerFlags(t *testing.T) {
-	for _, args := range [][]string{{"-host", "nowhere"}, {"-port", "70000"}, {"-bogus"}, {"-reboot", "-1s"}} {
+	for _, args := range [][]string{{"-host", "nowhere"}, {"-port", "70000"}, {"-bogus"}, {"-reboot", "-1s"}, {"-push-port", "-1"}, {"-bcast-port", "70000"}} {
 		if err := run(context.Background(), args, &bytes.Buffer{}, nil); err == nil {
 			t.Errorf("%v accepted", args)
 		}

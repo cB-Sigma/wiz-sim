@@ -40,6 +40,27 @@ reset keeps, the updateStatus values sent during a firmware update, the
 content of getWifiConfig, registrations surviving a restart, the refusal
 of unknown setUserConfig keys, and every configuration value it reports.
 
+### v0.3.0 (2026-10-11)
+
+v0.3.0 adds lamps with a state per head, pulse, pushes to the
+registration's phoneIp (`SetPushPort`), the broadcast socket on a chosen
+port (`NewHostAt`), answers from it (`SetBroadcastAnswers`), and the
+interop module. Facts read on 2026-10-11 from pywizlight 0.6.6 (the
+sdist from PyPI), for facts only: the devices numbering for dual-head
+lamps (bulb.py and its dual-head tests: getPilot selector 0 or 1, answers
+and pushes tagged 1 or 2, setPilot with the head), pulse's params
+(README.md), and that pywizlight receives pushes on port 38900 at the
+address it registers as phoneIp (push_manager.py), while registering
+from another socket. What the simulator does where pywizlight is silent
+(setPilot without devices on a per-head lamp, refusing ratio and devices
+3 there, pulse not changing the state) is our own choice and documented
+as such.
+
+The interop module installs pywizlight 0.6.6 from PyPI in Docker at test
+time and drives it with testdata/pywizlight_client.py, our own script;
+no pywizlight code is kept in this repository. The pywizlight run showed
+the push-address fault recorded in the README.
+
 ## Sources
 
 | Source | Commit read | Licence |
@@ -53,7 +74,8 @@ of unknown setUserConfig keys, and every configuration value it reports.
 |---|---|---|
 | Simulated devices, discovery socket, pushes (sim/) | none published | PY: method and field names, ports, registration and push messages, module names, the class order, fan keys and ranges, ratio, setState, getModelConfig and getUserConfig keys, getPower and pc, reboot and reset. WZ: setUserConfig keys, updateOta params and progress pushes, the acknowledgement, fwOtaStatus, firstBeat as an announcement after booting, the 1 to 100 dimming range. HA, OH: fan modes and the example module ESP03_FANDIMS_31 |
 | Command (cmd/wizsim) | none | none; our own code |
-| Integration tests (sim/wiz_integration_test.go, sim/methods_test.go) | none | none; they drive github.com/cB-Sigma/wiz |
+| Integration tests (sim/wiz_integration_test.go, sim/methods_test.go, sim/v030_test.go) | none | none; they drive github.com/cB-Sigma/wiz |
+| Interop (interop/, tests only) | none | none; our own script drives pywizlight 0.6.6, installed at test time |
 
 ## Test data
 

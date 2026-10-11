@@ -22,6 +22,9 @@
 // gives the devices ports 38899 to 38905. With -toggle, the colour bulb
 // switches every interval, so registered clients receive pushes. -reboot
 // sets how long a device stays silent after reboot or a firmware update.
+// -bcast-port puts the broadcast socket on a given port; -push-port makes
+// devices push to each registration's phoneIp at that port, as real
+// devices push to port 38900.
 package main
 
 import (
@@ -61,8 +64,15 @@ func run(ctx context.Context, args []string, out io.Writer, ready func(*sim.Sim)
 	port := fs.Int("port", 0, "UDP port of the first device; the others follow (0: free ports)")
 	toggle := fs.Duration("toggle", 0, "switch the colour bulb on and off at this interval (0: never)")
 	reboot := fs.Duration("reboot", 2*time.Second, "how long a device stays silent after reboot or a firmware update")
+	bcastPort := fs.Int("bcast-port", 0, "UDP port standing in for the broadcast address (0: a free port)")
+	pushPort := fs.Int("push-port", 0, "push to each registration's phoneIp at this port, as devices push to 38900 (0: to the registration's source)")
 	if err := fs.Parse(args); err != nil {
 		return err
+	}
+	for name, v := range map[string]int{"-bcast-port": *bcastPort, "-push-port": *pushPort} {
+		if v < 0 || v > 65535 {
+			return fmt.Errorf("%s %d is out of range", name, v)
+		}
 	}
 	if *port < 0 || *port > 65535-len(demo) {
 		return fmt.Errorf("-port %d is out of range", *port)
@@ -70,12 +80,13 @@ func run(ctx context.Context, args []string, out io.Writer, ready func(*sim.Sim)
 	if *reboot < 0 {
 		return fmt.Errorf("-reboot %s is negative", *reboot)
 	}
-	s, err := sim.NewHost(*host)
+	s, err := sim.NewHostAt(*host, *bcastPort)
 	if err != nil {
 		return err
 	}
 	defer s.Close()
 	s.SetRebootTime(*reboot)
+	s.SetPushPort(*pushPort)
 	for i, d := range demo {
 		p := 0
 		if *port != 0 {

@@ -7,9 +7,12 @@
 //
 // The methods answered are getPilot, setPilot, setState, getSystemConfig,
 // getModelConfig, getUserConfig, setUserConfig, getWifiConfig,
-// setSystemConfig, setModelConfig, getPower, registration, reboot, reset
-// and updateOta. Fan modules (FANDIM, DDTW) take fanState, fanMode,
-// fanSpeed and fanRevrs; dual-head modules (DH) take ratio. Sockets are on
+// setSystemConfig, setModelConfig, getPower, registration, reboot, reset,
+// updateOta and pulse. Fan modules (FANDIM, DDTW) take fanState, fanMode,
+// fanSpeed and fanRevrs; dual-head modules (DH) take ratio, or, with
+// Device.PerHead, keep a state per head addressed with devices (the
+// numbering of pywizlight 0.6.6). SetPushPort makes devices push to the
+// registration's phoneIp as real devices do. Sockets are on
 // 127.0.0.1 unless NewHost names another address. Built from the publicly
 // described behaviour of the local API; not a WiZ product. Where public
 // descriptions are silent (what reset keeps, what updateStatus values
@@ -64,6 +67,16 @@ type Device struct {
 	// LatestFirmware is the version updateOta with fw "default" installs;
 	// "" keeps the current one.
 	LatestFirmware string
+	// PerHead makes a dual-head module (DH in its name) keep a state per
+	// head instead of splitting one light with ratio: State is head 1's,
+	// Head2 head 2's (State is copied when Head2 is the zero State). The
+	// numbering follows pywizlight 0.6.6: setPilot and setState take the
+	// head, 1 or 2, in the devices key (without it both heads change);
+	// getPilot takes devices 0 or 1 and answers with the head, 1 or 2, in
+	// devices; syncPilot pushes carry the head the same way. A plain
+	// getPilot answers with head 1's state, untagged. ratio is refused.
+	PerHead bool
+	Head2   State
 }
 
 type device struct {
@@ -74,7 +87,9 @@ type device struct {
 	restarting bool
 	otaStatus  int
 	pushTo     []*net.UDPAddr
+	phoneIP    net.IP // the registration's phoneIp, when it is a usable IPv4 address
 	user       map[string]any
+	head2      State // head 2 of a PerHead device
 }
 
 // Sim is a set of simulated devices.
@@ -91,8 +106,12 @@ type Sim struct {
 	wg         sync.WaitGroup
 	host       net.IP
 	rebootTime time.Duration
-	done       chan struct{}
-	closeOnce  sync.Once
+	pushPort   int
+	pulses     map[string]int
+	// bcastAnswers: devices answer the broadcast socket's datagrams from it.
+	bcastAnswers bool
+	done         chan struct{}
+	closeOnce    sync.Once
 }
 
 // New returns a simulator on 127.0.0.1 with no devices and its broadcast
@@ -108,13 +127,20 @@ func New() *Sim {
 // NewHost returns a simulator whose sockets are on the IPv4 address host,
 // with no devices and its broadcast socket open on a free port.
 func NewHost(host string) (*Sim, error) {
+	return NewHostAt(host, 0)
+}
+
+// NewHostAt is NewHost with the broadcast socket on the given port (0 for
+// a free one). Clients that always send discovery to port 38899, such as
+// pywizlight, need it there.
+func NewHostAt(host string, broadcastPort int) (*Sim, error) {
 	ip := net.ParseIP(host).To4()
 	if ip == nil {
 		return nil, fmt.Errorf("sim: %q is not an IPv4 address", host)
 	}
 	s := &Sim{calls: map[string]int{}, sets: map[string][]map[string]any{}, reqs: map[string]map[string][]map[string]any{},
-		regs: map[string]int{}, lastReg: map[string]map[string]any{}, host: ip, rebootTime: 2 * time.Second, done: make(chan struct{})}
-	c, err := net.ListenUDP("udp4", &net.UDPAddr{IP: ip})
+		regs: map[string]int{}, lastReg: map[string]map[string]any{}, pulses: map[string]int{}, host: ip, rebootTime: 2 * time.Second, done: make(chan struct{})}
+	c, err := net.ListenUDP("udp4", &net.UDPAddr{IP: ip, Port: broadcastPort})
 	if err != nil {
 		return nil, err
 	}
@@ -184,7 +210,7 @@ func (s *Sim) AddAt(d Device, port int) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	dv := &device{cfg: d, initial: d, conn: c, user: defaultUserConfig(d)}
+	dv := &device{cfg: d, initial: d, conn: c, user: defaultUserConfig(d), head2: initialHead2(d)}
 	s.mu.Lock()
 	s.devs = append(s.devs, dv)
 	s.mu.Unlock()
@@ -199,6 +225,57 @@ func (s *Sim) SetRebootTime(d time.Duration) {
 	s.mu.Lock()
 	s.rebootTime = d
 	s.mu.Unlock()
+}
+
+// SetPushPort makes devices push to the registration's phoneIp at port,
+// as real devices do (port 38900, wiz.PushPort). With 0, the default,
+// they push to the address the registration came from instead: a
+// simulator convenience that lets tests register from any free port.
+// A registration whose phoneIp is not an IPv4 address (or is 0.0.0.0)
+// is pushed to at its source address either way.
+func (s *Sim) SetPushPort(port int) {
+	s.mu.Lock()
+	s.pushPort = port
+	s.mu.Unlock()
+}
+
+// HeadState returns head 1's or head 2's state of a PerHead device (head
+// 1 is State).
+func (s *Sim) HeadState(mac string, head int) State {
+	d := s.find(mac)
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if d == nil {
+		return State{}
+	}
+	if head == 2 {
+		return d.head2
+	}
+	return d.cfg.State
+}
+
+// SetHeadState changes one head (1 or 2) of a PerHead device, as the phone
+// app would, and pushes that head's syncPilot to registered addresses.
+func (s *Sim) SetHeadState(mac string, head int, f func(*State)) {
+	d := s.find(mac)
+	if d == nil || (head != 1 && head != 2) {
+		return
+	}
+	s.mu.Lock()
+	if head == 2 {
+		f(&d.head2)
+	} else {
+		f(&d.cfg.State)
+	}
+	s.mu.Unlock()
+	s.push(d, "syncPilot", s.headPilot(d, head, "udp"))
+}
+
+// Pulses counts the pulse requests a device accepted.
+func (s *Sim) Pulses(mac string) int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.pulses[mac]
 }
 
 // BroadcastAddr is the address to use as the discovery broadcast address.
@@ -266,7 +343,12 @@ func (s *Sim) SetState(mac string, f func(*State)) {
 	}
 	s.mu.Lock()
 	f(&d.cfg.State)
+	perHead := d.cfg.PerHead
 	s.mu.Unlock()
+	if perHead { // head 1's state; its push carries the head
+		s.push(d, "syncPilot", s.headPilot(d, 1, "udp"))
+		return
+	}
 	s.push(d, "syncPilot", nil)
 }
 
@@ -370,9 +452,13 @@ func (s *Sim) serveBroadcast() {
 		}
 		s.mu.Lock()
 		devs := append([]*device(nil), s.devs...)
+		var via *net.UDPConn
+		if s.bcastAnswers {
+			via = s.bcast
+		}
 		s.mu.Unlock()
 		for _, d := range devs {
-			s.handle(d, buf[:n], from)
+			s.handle(d, buf[:n], from, via)
 		}
 	}
 }
@@ -385,13 +471,32 @@ func (s *Sim) serve(d *device) {
 		if err != nil {
 			return
 		}
-		s.handle(d, append([]byte(nil), buf[:n]...), from)
+		s.handle(d, append([]byte(nil), buf[:n]...), from, nil)
 	}
 }
 
-func (s *Sim) reply(d *device, to *net.UDPAddr, v any) {
+// replyVia answers from the device's socket, or from via when it is not
+// nil.
+func (s *Sim) replyVia(via *net.UDPConn, d *device, to *net.UDPAddr, v any) {
 	b, _ := json.Marshal(v)
-	_, _ = d.conn.WriteToUDP(b, to)
+	if via == nil {
+		via = d.conn
+	}
+	_, _ = via.WriteToUDP(b, to)
+}
+
+// SetBroadcastAnswers makes devices answer datagrams sent to the
+// broadcast socket from that socket rather than from their own. Real
+// devices answer discovery from port 38899, the port it was sent to; in
+// the simulator every device has a port of its own, and a client behind
+// NAT (a Docker container reaching the simulator through
+// host.docker.internal, for example) only receives answers from the port
+// it sent to. The answers then all come from the broadcast address, so
+// the client learns each device's MAC but not its port: use Addr for that.
+func (s *Sim) SetBroadcastAnswers(on bool) {
+	s.mu.Lock()
+	s.bcastAnswers = on
+	s.mu.Unlock()
 }
 
 func errReply(method string, code int, msg string) map[string]any {
@@ -407,7 +512,7 @@ const (
 	codeInvalidParams  = -32602
 )
 
-func (s *Sim) handle(d *device, b []byte, from *net.UDPAddr) {
+func (s *Sim) handle(d *device, b []byte, from *net.UDPAddr, via *net.UDPConn) {
 	var m struct {
 		Method string          `json:"method"`
 		Params json.RawMessage `json:"params"`
@@ -441,18 +546,48 @@ func (s *Sim) handle(d *device, b []byte, from *net.UDPAddr) {
 	s.mu.Unlock()
 	switch m.Method {
 	case "getPilot":
-		s.reply(d, from, okReply("getPilot", s.pilot(d, "")))
+		if _, sel := params["devices"]; sel {
+			// pywizlight 0.6.6's selector: 0 or 1 for head 1 or 2. Devices
+			// without a state per head ignore it, as pywizlight expects of
+			// such firmware.
+			if !cfg.PerHead {
+				s.replyVia(via, d, from, okReply("getPilot", s.pilot(d, "")))
+				return
+			}
+			n, _, bad := inRange(params, "devices", 0, 1)
+			if bad {
+				s.replyVia(via, d, from, errReply("getPilot", codeInvalidParams, "Invalid params"))
+				return
+			}
+			s.replyVia(via, d, from, okReply("getPilot", s.headPilot(d, n+1, "")))
+			return
+		}
+		s.replyVia(via, d, from, okReply("getPilot", s.pilot(d, "")))
+	case "pulse":
+		// pywizlight's README describes delta (-100 to 100) and duration
+		// (milliseconds). The simulator checks them and counts the pulse;
+		// the light's state does not change.
+		delta, _, okDelta := intParam(params, "delta")
+		dur, _, okDur := intParam(params, "duration")
+		if !okDelta || delta == 0 || delta < -100 || delta > 100 || !okDur || dur < 1 || kind(module) == kindSocket {
+			s.replyVia(via, d, from, errReply("pulse", codeInvalidParams, "Invalid params"))
+			return
+		}
+		s.mu.Lock()
+		s.pulses[mac]++
+		s.mu.Unlock()
+		s.replyVia(via, d, from, okReply("pulse", map[string]any{"success": true}))
 	case "getSystemConfig":
-		s.reply(d, from, okReply("getSystemConfig", map[string]any{
+		s.replyVia(via, d, from, okReply("getSystemConfig", map[string]any{
 			"mac": mac, "homeId": 4242, "roomId": 7, "moduleName": module, "fwVersion": fw, "groupId": 0, "typeId": 0, "ping": 0,
 			"fwOtaStatus": ota,
 		}))
 	case "getModelConfig":
 		if cfg.NoModelConfig {
-			s.reply(d, from, errReply("getModelConfig", codeMethodNotFound, "Method not found"))
+			s.replyVia(via, d, from, errReply("getModelConfig", codeMethodNotFound, "Method not found"))
 			return
 		}
-		s.reply(d, from, okReply("getModelConfig", modelConfig(cfg)))
+		s.replyVia(via, d, from, okReply("getModelConfig", modelConfig(cfg)))
 	case "getUserConfig":
 		s.mu.Lock()
 		u := make(map[string]any, len(d.user))
@@ -460,30 +595,30 @@ func (s *Sim) handle(d *device, b []byte, from *net.UDPAddr) {
 			u[k] = v
 		}
 		s.mu.Unlock()
-		s.reply(d, from, okReply("getUserConfig", u))
+		s.replyVia(via, d, from, okReply("getUserConfig", u))
 	case "setUserConfig":
 		if msg := s.setUserConfig(d, params); msg != "" {
-			s.reply(d, from, errReply("setUserConfig", codeInvalidParams, msg))
+			s.replyVia(via, d, from, errReply("setUserConfig", codeInvalidParams, msg))
 			return
 		}
-		s.reply(d, from, okReply("setUserConfig", map[string]any{"success": true}))
+		s.replyVia(via, d, from, okReply("setUserConfig", map[string]any{"success": true}))
 	case "getWifiConfig":
 		// What real devices hold here is not publicly described; an opaque
 		// string stands in for it.
-		s.reply(d, from, okReply("getWifiConfig", fmt.Sprintf("%x", "wizsim "+mac)))
+		s.replyVia(via, d, from, okReply("getWifiConfig", fmt.Sprintf("%x", "wizsim "+mac)))
 	case "setSystemConfig", "setModelConfig":
 		// Factory settings: recorded (Requests), never applied.
 		if len(params) == 0 {
-			s.reply(d, from, errReply(m.Method, codeInvalidParams, "Invalid params"))
+			s.replyVia(via, d, from, errReply(m.Method, codeInvalidParams, "Invalid params"))
 			return
 		}
-		s.reply(d, from, okReply(m.Method, map[string]any{"success": true}))
+		s.replyVia(via, d, from, okReply(m.Method, map[string]any{"success": true}))
 	case "getPower":
 		if kind(module) != kindSocket {
-			s.reply(d, from, errReply("getPower", codeMethodNotFound, "Method not found"))
+			s.replyVia(via, d, from, errReply("getPower", codeMethodNotFound, "Method not found"))
 			return
 		}
-		s.reply(d, from, okReply("getPower", map[string]any{"power": pw}))
+		s.replyVia(via, d, from, okReply("getPower", map[string]any{"power": pw}))
 	case "registration":
 		reg, _ := params["register"].(bool)
 		if reg {
@@ -491,18 +626,33 @@ func (s *Sim) handle(d *device, b []byte, from *net.UDPAddr) {
 			s.regs[mac]++
 			s.lastReg[mac] = params
 			d.pushTo = []*net.UDPAddr{from}
+			d.phoneIP = nil
+			if str, ok := params["phoneIp"].(string); ok {
+				if ip := net.ParseIP(str).To4(); ip != nil && !ip.IsUnspecified() {
+					d.phoneIP = ip
+				}
+			}
 			s.mu.Unlock()
 		}
-		s.reply(d, from, okReply("registration", map[string]any{"mac": mac, "success": true}))
+		s.replyVia(via, d, from, okReply("registration", map[string]any{"mac": mac, "success": true}))
 	case "setPilot", "setState":
-		if msg := s.setPilot(d, params, m.Method == "setPilot"); msg != "" {
-			s.reply(d, from, errReply(m.Method, codeInvalidParams, msg))
+		heads, msg := s.setPilot(d, params, m.Method == "setPilot")
+		if msg != "" {
+			s.replyVia(via, d, from, errReply(m.Method, codeInvalidParams, msg))
 			return
 		}
-		s.reply(d, from, okReply(m.Method, map[string]any{"success": true}))
-		go s.push(d, "syncPilot", nil)
+		s.replyVia(via, d, from, okReply(m.Method, map[string]any{"success": true}))
+		if len(heads) == 0 {
+			go s.push(d, "syncPilot", nil)
+			return
+		}
+		go func() {
+			for _, h := range heads {
+				s.push(d, "syncPilot", s.headPilot(d, h, "udp"))
+			}
+		}()
 	case "reboot":
-		s.reply(d, from, okReply("reboot", map[string]any{"success": true}))
+		s.replyVia(via, d, from, okReply("reboot", map[string]any{"success": true}))
 		s.background(func() { s.restart(d, nil) })
 	case "reset":
 		// What a factory reset keeps is not publicly described. Here the
@@ -510,9 +660,10 @@ func (s *Sim) handle(d *device, b []byte, from *net.UDPAddr) {
 		// ones, its push registration is dropped and it leaves the network
 		// (as a device without Wi-Fi settings would) until SetOffline(mac,
 		// false) sets it up again. The firmware version is kept.
-		s.reply(d, from, okReply("reset", map[string]any{"success": true}))
+		s.replyVia(via, d, from, okReply("reset", map[string]any{"success": true}))
 		s.mu.Lock()
 		d.cfg.State = d.initial.State
+		d.head2 = initialHead2(d.initial)
 		d.cfg.PowerMW = d.initial.PowerMW
 		d.user = defaultUserConfig(d.cfg)
 		d.pushTo = nil
@@ -521,13 +672,13 @@ func (s *Sim) handle(d *device, b []byte, from *net.UDPAddr) {
 	case "updateOta":
 		target, msg := s.otaTarget(d, params)
 		if msg != "" {
-			s.reply(d, from, errReply("updateOta", codeInvalidParams, msg))
+			s.replyVia(via, d, from, errReply("updateOta", codeInvalidParams, msg))
 			return
 		}
-		s.reply(d, from, okReply("updateOta", map[string]any{"success": true}))
+		s.replyVia(via, d, from, okReply("updateOta", map[string]any{"success": true}))
 		s.background(func() { s.update(d, target) })
 	default:
-		s.reply(d, from, errReply(m.Method, codeMethodNotFound, "Method not found"))
+		s.replyVia(via, d, from, errReply(m.Method, codeMethodNotFound, "Method not found"))
 	}
 }
 
@@ -639,14 +790,66 @@ func inRange(p map[string]any, key string, lo, hi int) (n int, present, bad bool
 	return n, present, false
 }
 
+// initialHead2 is head 2's initial state of a PerHead device: Head2, or a
+// copy of State when Head2 is the zero State.
+func initialHead2(d Device) State {
+	if !d.PerHead || d.Head2 != (State{}) {
+		return d.Head2
+	}
+	return d.State
+}
+
 // setPilot applies setPilot (on true) or setState (on false: the light is
-// not switched on unless state says so). It returns a refusal message, ""
-// when applied.
-func (s *Sim) setPilot(d *device, p map[string]any, on bool) string {
+// not switched on unless state says so). It returns the heads changed on a
+// PerHead device (nil otherwise) and a refusal message, "" when applied.
+func (s *Sim) setPilot(d *device, p map[string]any, on bool) ([]int, string) {
 	const invalid = "Invalid params"
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	st := d.cfg.State
+	if !d.cfg.PerHead {
+		if _, ok := p["devices"]; ok {
+			return nil, invalid
+		}
+		st, msg := s.applyPilot(d, d.cfg.State, p, on)
+		if msg != "" {
+			return nil, msg
+		}
+		d.cfg.State = st
+		s.sets[d.cfg.MAC] = append(s.sets[d.cfg.MAC], p)
+		return nil, ""
+	}
+	if _, ok := p["ratio"]; ok {
+		return nil, invalid // a lamp with a state per head does not split one light
+	}
+	heads := []int{1, 2}
+	if _, ok := p["devices"]; ok {
+		n, _, bad := inRange(p, "devices", 1, 2)
+		if bad {
+			return nil, invalid
+		}
+		heads = []int{n}
+	}
+	st1, st2 := d.cfg.State, d.head2
+	for _, h := range heads {
+		cur := &st1
+		if h == 2 {
+			cur = &st2
+		}
+		next, msg := s.applyPilot(d, *cur, p, on)
+		if msg != "" {
+			return nil, msg
+		}
+		*cur = next
+	}
+	d.cfg.State, d.head2 = st1, st2
+	s.sets[d.cfg.MAC] = append(s.sets[d.cfg.MAC], p)
+	return heads, ""
+}
+
+// applyPilot applies setPilot's params to st and returns the new state,
+// or a refusal message. The caller holds s.mu.
+func (s *Sim) applyPilot(d *device, st State, p map[string]any, on bool) (State, string) {
+	const invalid = "Invalid params"
 	k := kind(d.cfg.Module)
 	light := func() {
 		if on {
@@ -656,7 +859,7 @@ func (s *Sim) setPilot(d *device, p map[string]any, on bool) string {
 	if v, ok := p["state"]; ok {
 		b, isBool := v.(bool)
 		if !isBool {
-			return invalid
+			return st, invalid
 		}
 		st.On = b
 	}
@@ -665,7 +868,7 @@ func (s *Sim) setPilot(d *device, p map[string]any, on bool) string {
 		minDim = 10
 	}
 	if v, present, bad := inRange(p, "dimming", minDim, 100); bad {
-		return invalid
+		return st, invalid
 	} else if present {
 		st.Dimming = v
 		light()
@@ -675,13 +878,13 @@ func (s *Sim) setPilot(d *device, p map[string]any, on bool) string {
 	_, hasB := p["b"]
 	if hasR || hasG || hasB {
 		if k != kindRGB {
-			return invalid
+			return st, invalid
 		}
 		var rgb [3]int
 		for i, key := range []string{"r", "g", "b"} {
 			v, _, bad := inRange(p, key, 0, 255)
 			if bad {
-				return invalid
+				return st, invalid
 			}
 			rgb[i] = v
 		}
@@ -691,31 +894,31 @@ func (s *Sim) setPilot(d *device, p map[string]any, on bool) string {
 	}
 	for key, dst := range map[string]*int{"c": &st.C, "w": &st.W} {
 		if v, present, bad := inRange(p, key, 0, 255); bad || present && k != kindRGB {
-			return invalid
+			return st, invalid
 		} else if present {
 			*dst = v
 		}
 	}
 	if v, present, bad := inRange(p, "temp", 1000, 10000); bad {
-		return invalid
+		return st, invalid
 	} else if present {
 		if k == kindDW || k == kindSocket || k == kindFanDim {
-			return invalid
+			return st, invalid
 		}
 		st.Temp, st.SceneID = v, 0
 		light()
 	}
 	if v, present, bad := inRange(p, "sceneId", 1, 1<<31-1); bad {
-		return invalid
+		return st, invalid
 	} else if present {
 		if k == kindSocket {
-			return invalid
+			return st, invalid
 		}
 		st.SceneID, st.Temp = v, 0
 		light()
 	}
 	if v, present, bad := inRange(p, "speed", 10, 200); bad {
-		return invalid
+		return st, invalid
 	} else if present {
 		st.Speed = v
 	}
@@ -726,20 +929,18 @@ func (s *Sim) setPilot(d *device, p map[string]any, on bool) string {
 	}{{"fanState", 0, 1, &st.FanState}, {"fanMode", 1, 2, &st.FanMode}, {"fanSpeed", 1, fanSpeeds(d.cfg), &st.FanSpeed}, {"fanRevrs", 0, 1, &st.FanRevrs}} {
 		v, present, bad := inRange(p, f.key, f.lo, f.hi)
 		if bad || present && !isFan(k) {
-			return invalid
+			return st, invalid
 		}
 		if present {
 			*f.dst = v
 		}
 	}
 	if v, present, bad := inRange(p, "ratio", 0, 100); bad || present && !dualHead(d.cfg.Module) {
-		return invalid
+		return st, invalid
 	} else if present {
 		st.Ratio = v
 	}
-	d.cfg.State = st
-	s.sets[d.cfg.MAC] = append(s.sets[d.cfg.MAC], p)
-	return ""
+	return st, ""
 }
 
 // setUserConfig stores the setUserConfig params the vendor's own library
@@ -889,7 +1090,25 @@ func (s *Sim) update(d *device, target string) {
 func (s *Sim) pilot(d *device, src string) map[string]any {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	return pilotOf(d, d.cfg.State, src)
+}
+
+// headPilot returns one head's state of a PerHead device, tagged with the
+// head in devices.
+func (s *Sim) headPilot(d *device, head int, src string) map[string]any {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	st := d.cfg.State
+	if head == 2 {
+		st = d.head2
+	}
+	m := pilotOf(d, st, src)
+	m["devices"] = head
+	return m
+}
+
+// pilotOf returns st as the device reports it. The caller holds s.mu.
+func pilotOf(d *device, st State, src string) map[string]any {
 	k := kind(d.cfg.Module)
 	m := map[string]any{"mac": d.cfg.MAC, "rssi": -58, "src": src, "state": st.On}
 	if k == kindSocket {
@@ -909,17 +1128,22 @@ func (s *Sim) pilot(d *device, src string) map[string]any {
 	if isFan(k) {
 		m["fanState"], m["fanMode"], m["fanSpeed"], m["fanRevrs"] = st.FanState, st.FanMode, st.FanSpeed, st.FanRevrs
 	}
-	if dualHead(d.cfg.Module) {
+	if dualHead(d.cfg.Module) && !d.cfg.PerHead {
 		m["ratio"] = st.Ratio
 	}
 	return m
 }
 
 // push sends a push to the device's registered addresses: a syncPilot
-// with the pilot, a firstBeat, or method with params.
+// with the pilot (or with params when given), a firstBeat, or method with
+// params.
 func (s *Sim) push(d *device, method string, params map[string]any) {
 	s.mu.Lock()
 	to := append([]*net.UDPAddr(nil), d.pushTo...)
+	if s.pushPort > 0 && d.phoneIP != nil && len(to) > 0 {
+		// Real devices push to the registration's phoneIp, port 38900.
+		to = []*net.UDPAddr{{IP: d.phoneIP, Port: s.pushPort}}
+	}
 	off := d.offline
 	mac, fw := d.cfg.MAC, d.cfg.Firmware
 	s.mu.Unlock()
@@ -930,7 +1154,9 @@ func (s *Sim) push(d *device, method string, params map[string]any) {
 	case "firstBeat":
 		params = map[string]any{"mac": mac, "homeId": 4242, "fwVersion": fw}
 	case "syncPilot":
-		params = s.pilot(d, "udp")
+		if params == nil {
+			params = s.pilot(d, "udp")
+		}
 	}
 	b, _ := json.Marshal(map[string]any{"method": method, "env": "pro", "params": params})
 	// A real light pushes from a port of its own, not its API port (38899):

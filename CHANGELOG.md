@@ -3,6 +3,31 @@
 All notable changes to this module. Versions follow semantic versioning;
 before v1 the API may change in minor versions.
 
+## v0.3.0 (2026-10-11)
+
+Needs github.com/cB-Sigma/wiz v0.3.0 for its tests.
+
+### Added
+
+- Dual-head lamps with a state per head: `Device.PerHead` and
+  `Device.Head2`, with pywizlight 0.6.6's devices numbering in getPilot,
+  setPilot, setState and syncPilot; `Sim.HeadState`, `Sim.SetHeadState`.
+- pulse (delta and duration checked, counted by `Sim.Pulses`).
+- `Sim.SetPushPort`: push to the registration's phoneIp at a port, as
+  real devices push to phoneIp, port 38900.
+- `NewHostAt` (the broadcast socket on a chosen port) and
+  `Sim.SetBroadcastAnswers` (answer the broadcast socket's datagrams from
+  it, for clients behind NAT).
+- wizsim flags `-bcast-port` and `-push-port`.
+- The interop module: pywizlight 0.6.6's client against the simulator,
+  in Docker (SIGMA_WIZ_INTEROP=1).
+
+### Fixed
+
+- Pushes could only go to the registration's source address; pywizlight
+  listens at phoneIp, port 38900, and so missed them. `SetPushPort`
+  sends them there (opt-in; the default is unchanged).
+
 ## v0.2.0 (2026-10-11)
 
 Needs github.com/cB-Sigma/wiz v0.2.0 for its tests and the command.

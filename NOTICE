@@ -31,6 +31,14 @@ taken from any of them; see PROVENANCE.md.
   Apache-2.0).
 - openHAB's WiZ binding (github.com/openhab/openhab-addons; EPL-2.0).
 
+Test peers
+----------
+
+The interop module (tests only, not part of the published package)
+installs pywizlight 0.6.6 (MIT, Copyright (c) 2020 Stephan Traub) from
+PyPI in a Docker container at test time and drives it with our own
+script; no pywizlight code is kept in this repository.
+
 Dependencies
 ------------
 

@@ -8,10 +8,12 @@ Simulated WiZ lights, plugs and ceiling fans on the local UDP API, for testing W
 
 | Feature | Status |
 |---|---|
-| One UDP socket per device, answering getPilot, setPilot, setState, getSystemConfig, getModelConfig, getUserConfig, setUserConfig, getWifiConfig, setSystemConfig, setModelConfig, getPower, registration, reboot, reset and updateOta | yes |
-| A socket standing in for the broadcast address, so discovery reaches every device | yes |
-| syncPilot pushes to registered addresses on state change, sent from a port of the device's own; firstBeat on demand and after a restart; updateOta progress pushes; acknowledgements counted | yes |
+| One UDP socket per device, answering getPilot, setPilot, setState, getSystemConfig, getModelConfig, getUserConfig, setUserConfig, getWifiConfig, setSystemConfig, setModelConfig, getPower, registration, reboot, reset, updateOta and pulse | yes |
+| A socket standing in for the broadcast address, so discovery reaches every device | yes; on a chosen port with `NewHostAt` (pywizlight sends discovery to 38899 only); `SetBroadcastAnswers` answers from that socket, for clients behind NAT such as a Docker container |
+| syncPilot pushes to registered addresses on state change, sent from a port of the device's own; firstBeat on demand and after a restart; updateOta progress pushes; acknowledgements counted | yes; to the registration's phoneIp at a given port with `SetPushPort` (real devices push to phoneIp, port 38900), else to the registration's source |
 | Module classes | colour, tunable white, dimmable white, plug, fan with a dimmable light (FANDIM), fan with a tunable-white light (DDTW), dual head (DH); any module name can be configured |
+| Dual-head lamps | ratio, or a state per head (`Device.PerHead`, v0.3.0) with pywizlight 0.6.6's numbering: setPilot/setState take devices 1 or 2 (both heads without it), getPilot takes devices 0 or 1 and answers tagged 1 or 2, pushes are tagged; `HeadState`, `SetHeadState` |
+| pulse | delta -100 to 100 (not 0) and duration in milliseconds checked, counted (`Pulses`); the state does not change; refused by plugs |
 | Fans | fanState, fanMode, fanSpeed (1 to the configured number of speeds) and fanRevrs, independent of the light; bad values refused with -32602 |
 | setPilot checks | dimming 10 to 100 (configurable floor), r/g/b/c/w 0 to 255 on colour modules, temp 1000 to 10000 K except on dimmable modules and plugs, speed 10 to 200, ratio 0 to 100 on dual-head modules |
 | Power | getPower and `pc` in the pilot for plugs; "method not found" for the others |
@@ -42,6 +44,14 @@ own; tests should not take them for real-device behaviour:
   dftDim, startupMode and userConfigTs.
 - The configuration values (cctRange, renderFactor, fade times) are the
   simulator's own.
+- A lamp with a state per head (`PerHead`): setPilot without devices
+  changes both heads and pushes each; a plain getPilot answers with head
+  1's state, untagged; ratio is refused; devices 3 (which pywizlight's
+  builder accepts without describing) is refused. A lamp without a state
+  per head ignores getPilot's selector and refuses devices in setPilot.
+- pulse changes nothing the simulator reports; plugs refuse it.
+- Pushes go to the registration's source address unless `SetPushPort`
+  is set (the default keeps tests free to register from any port).
 
 ## Install
 
@@ -63,6 +73,8 @@ go run github.com/cB-Sigma/wiz-sim/cmd/wizsim@latest -host 127.0.0.1 -port 38899
 | `-port` | 0 | UDP port of the first device; the others follow (0: free ports) |
 | `-toggle` | 0 | switch the colour bulb on and off at this interval, so registered clients receive pushes (0: never) |
 | `-reboot` | 2s | how long a device stays silent after reboot or a firmware update |
+| `-bcast-port` | 0 | UDP port standing in for the broadcast address (0: a free port) |
+| `-push-port` | 0 | push to each registration's phoneIp at this port, as devices push to 38900 (0: to the registration's source) |
 
 Output of the invocation above:
 
@@ -163,7 +175,8 @@ s.SetRebootTime(300 * time.Millisecond) // reboot and firmware updates
 `sim.New` or `sim.NewHost` start an empty simulator; `Add` and `AddAt`
 add devices with any MAC, module name, firmware and state, and
 `Device` sets the number of fan speeds, the dimming floor, old firmware
-without getModelConfig and the firmware version updateOta offers.
+without getModelConfig, the firmware version updateOta offers and a
+state per head for dual-head lamps (`PerHead`, `Head2`).
 `sim.NewDemo` keeps its four devices; `sim.NewExtendedDemo` adds the
 fans and the dual-head lamp.
 
@@ -193,6 +206,49 @@ reboot, reset and firmware update against the simulator.
 The simulator is written from the same public descriptions as the wiz
 client; agreement between them is not independent evidence. It has not
 been compared with a real WiZ device.
+
+Independent (v0.3.0, 2026-10-11): the `interop` module runs pywizlight
+0.6.6's client (installed from PyPI in python:3.12.10-slim under Docker;
+our own script, testdata/pywizlight_client.py, drives its public
+classes) against the extended demo plus a dual-head lamp with a state per
+head. 40 checks passed: discovery of all eight devices; the bulb type,
+features, kelvin range and fan speeds of every class; colour, RGBWW,
+brightness, colour temperature, scenes, speed, setState, on, off and
+toggle; refusals of colour on tunable white and of temperature on
+dimmable white; getPower and `pc` on the plug and "method not found" on
+a bulb; fans (on, speed, breeze, reverse, toggle, the speed limit); the
+ratio lamp; per-head polling, per-head setPilot and per-head pushes;
+syncPilot and firstBeat pushes; reboot. The setPilot params pywizlight
+sent for six hue and saturation pairs and three RGB colours were also
+compared with the wiz module's pywizlight mapping (all within one step).
+
+What it showed was wrong, and fixed in v0.3.0: devices pushed to the
+address the registration came from, while pywizlight expects pushes at
+the registration's phoneIp, port 38900 (it listens there and registers
+from another socket);
+`SetPushPort` now does that (opt-in, see above). Two things are only
+needed to reach the simulator from a container: the broadcast socket on
+port 38899 (`NewHostAt`) and answers from it (`SetBroadcastAnswers`), as
+Docker passes back only answers from the port the container sent to; and
+the script registers 127.0.0.1 as pywizlight's phoneIp, standing in for
+the container's address, which the host cannot reach. Run it with
+
+```
+cd interop && SIGMA_WIZ_INTEROP=1 GOWORK=off go test -v ./...
+```
+
+It needs UDP port 38899 free on the host. Not covered by pywizlight,
+which has no calls for them: setUserConfig, setSystemConfig,
+setModelConfig, getWifiConfig, reset, updateOta and pulse.
+
+### Not yet
+
+- **Comparison with real devices**, and captures to settle the
+  simulator's own choices listed above (reset, the updateStatus values,
+  getWifiConfig, firstBeat's target, per-head behaviour without devices):
+  needs the devices.
+- **Wi-Fi setup, WiZ Pro, the cloud**: not publicly described, or need a
+  vendor account (see the wiz README).
 
 ## Demo values
 
