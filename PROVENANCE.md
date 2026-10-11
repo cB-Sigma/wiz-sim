@@ -22,13 +22,38 @@ integration tests that drive the client against the simulator. The
 command and the tests marked "Copyright 2026 Abhinav Gautam" were
 written for SigmaM2M and this module.
 
+### v0.2.0 (2026-10-11)
+
+v0.2.0 adds fans, dual-head ratio, setState, the configuration and
+maintenance methods, power in the pilot and firmware-update pushes. Their
+facts were read, for facts only, from the sources below at the commits
+named, the same reading as the wiz client's v0.2.0 (see its
+PROVENANCE.md for which fact came from which source). wiz-local-control
+is the vendor's own library (MIT, Copyright (c) 2018 WiZLighting); it was
+read for facts the same way and no code was taken from it. A line-by-line
+comparison with these sources was not needed, at the user's direction:
+nothing was translated from them.
+
+Where the sources are silent, the simulator's behaviour is its own
+choice and is documented as such in the README and on the methods: what
+reset keeps, the updateStatus values sent during a firmware update, the
+content of getWifiConfig, registrations surviving a restart, the refusal
+of unknown setUserConfig keys, and every configuration value it reports.
+
 ## Sources
+
+| Source | Commit read | Licence |
+|---|---|---|
+| [PY] pywizlight, github.com/sbidy/pywizlight | master c6ce9d97677aab1da3a693973fb3487383f5d235 (latest tag v0.6.6) | MIT, Copyright (c) 2020 Stephan Traub |
+| [HA] Home Assistant, github.com/home-assistant/core, homeassistant/components/wiz | dev 8792c68d | Apache-2.0 |
+| [OH] openHAB add-ons, github.com/openhab/openhab-addons, bundles/org.openhab.binding.wiz | main a5a74fd0 | EPL-2.0 |
+| [WZ] wiz-local-control, gitlab.com/wizlighting/wiz-local-control (the vendor's own library) | master b7bfe09f (2025-09-03) | MIT, Copyright (c) 2018 WiZLighting |
 
 | Area (files) | Followed | Read for facts only (no code taken) |
 |---|---|---|
-| Simulated devices, discovery socket, pushes (sim/) | none published | pywizlight (github.com/sbidy/pywizlight, MIT): method and field names, ports, registration and push messages, module names |
+| Simulated devices, discovery socket, pushes (sim/) | none published | PY: method and field names, ports, registration and push messages, module names, the class order, fan keys and ranges, ratio, setState, getModelConfig and getUserConfig keys, getPower and pc, reboot and reset. WZ: setUserConfig keys, updateOta params and progress pushes, the acknowledgement, fwOtaStatus, firstBeat as an announcement after booting, the 1 to 100 dimming range. HA, OH: fan modes and the example module ESP03_FANDIMS_31 |
 | Command (cmd/wizsim) | none | none; our own code |
-| Integration tests (sim/wiz_integration_test.go) | none | none; they drive github.com/cB-Sigma/wiz |
+| Integration tests (sim/wiz_integration_test.go, sim/methods_test.go) | none | none; they drive github.com/cB-Sigma/wiz |
 
 ## Test data
 

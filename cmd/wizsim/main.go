@@ -1,22 +1,27 @@
 // Copyright 2026 Abhinav Gautam
 // SPDX-License-Identifier: Apache-2.0
 
-// Command wizsim serves simulated WiZ lights and a plug on the local UDP
-// API, so a WiZ client can be tried without devices. Each device has its
-// own UDP port on -host (real devices each have 38899 on their own IP),
-// and a further port stands in for the broadcast address of discovery:
+// Command wizsim serves simulated WiZ lights, a plug and ceiling fans on
+// the local UDP API, so a WiZ client can be tried without devices. Each
+// device has its own UDP port on -host (real devices each have 38899 on
+// their own IP), and a further port stands in for the broadcast address
+// of discovery:
 //
-//	a8bb50e4c101  ESP01_SHRGB1C_31  colour bulb
+//	a8bb50e4c101  ESP01_SHRGB1C_31  colour bulb (firmware update to 1.32.0 offered)
 //	a8bb50e4c102  ESP56_SHTW3_01    tunable-white bulb
 //	a8bb50e4c103  ESP05_SHDW9_01    dimmable-white bulb
 //	a8bb50e4c104  ESP10_SOCKET_06   plug with power reading
+//	a8bb50e4c105  ESP03_FANDIMS_31  ceiling fan with a dimmable light, six speeds
+//	a8bb50e4c106  ESP20_DDTW1_01    ceiling fan with a tunable-white light, five speeds
+//	a8bb50e4c107  ESP20_DHRGB_01    dual-head colour lamp
 //
 // For example:
 //
 //	wizsim -host 127.0.0.1 -port 38899
 //
-// gives the devices ports 38899 to 38902. With -toggle, the colour bulb
-// switches every interval, so registered clients receive pushes.
+// gives the devices ports 38899 to 38905. With -toggle, the colour bulb
+// switches every interval, so registered clients receive pushes. -reboot
+// sets how long a device stays silent after reboot or a firmware update.
 package main
 
 import (
@@ -45,12 +50,7 @@ func main() {
 	}
 }
 
-var demo = []sim.Device{
-	{MAC: "a8bb50e4c101", Module: "ESP01_SHRGB1C_31", Firmware: "1.28.0", State: sim.State{On: true, Dimming: 80, R: 255, G: 120, B: 0}},
-	{MAC: "a8bb50e4c102", Module: "ESP56_SHTW3_01", Firmware: "1.25.0", State: sim.State{On: true, Dimming: 60, Temp: 2700}},
-	{MAC: "a8bb50e4c103", Module: "ESP05_SHDW9_01", Firmware: "1.22.0", State: sim.State{Dimming: 100, SceneID: 14}},
-	{MAC: "a8bb50e4c104", Module: "ESP10_SOCKET_06", Firmware: "1.26.1", State: sim.State{On: true}, PowerMW: 61500},
-}
+var demo = sim.ExtendedDemo()
 
 // run serves until ctx ends. ready, when not nil, receives the simulator
 // once it listens.
@@ -60,17 +60,22 @@ func run(ctx context.Context, args []string, out io.Writer, ready func(*sim.Sim)
 	host := fs.String("host", "127.0.0.1", "IPv4 address the devices listen on")
 	port := fs.Int("port", 0, "UDP port of the first device; the others follow (0: free ports)")
 	toggle := fs.Duration("toggle", 0, "switch the colour bulb on and off at this interval (0: never)")
+	reboot := fs.Duration("reboot", 2*time.Second, "how long a device stays silent after reboot or a firmware update")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
 	if *port < 0 || *port > 65535-len(demo) {
 		return fmt.Errorf("-port %d is out of range", *port)
 	}
+	if *reboot < 0 {
+		return fmt.Errorf("-reboot %s is negative", *reboot)
+	}
 	s, err := sim.NewHost(*host)
 	if err != nil {
 		return err
 	}
 	defer s.Close()
+	s.SetRebootTime(*reboot)
 	for i, d := range demo {
 		p := 0
 		if *port != 0 {

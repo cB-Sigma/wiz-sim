@@ -68,8 +68,8 @@ func TestSim(t *testing.T) {
 		t.Errorf("getPower on a light = %v", m)
 	}
 	// Unknown methods are refused; an offline device is silent.
-	if m := ask(t, addr, `{"method":"reboot"}`); m["error"] == nil {
-		t.Errorf("reboot = %v", m)
+	if m := ask(t, addr, `{"method":"noSuchMethod"}`); m["error"] == nil {
+		t.Errorf("noSuchMethod = %v", m)
 	}
 	if s.Calls("setPilot") != 4 {
 		t.Errorf("setPilot calls = %d", s.Calls("setPilot"))
